@@ -97,18 +97,15 @@ export default class Chat {
   }
 
   subscribeOnEvents() {
-    // подписка на события сокета происходит в openSocket
   }
 
   onEnterChatHandler(name) {
     this.api.checkNickname(name, (err, data) => {
       if (err) {
-        // Только показываем ошибку, модалку НЕ скрываем
         this.showError(err.message || 'Ошибка соединения с сервером');
         return;
       }
 
-      // Успех: сохраняем пользователя, убираем модалку, показываем чат
       this.user = data.user;
       this.modal.classList.remove('active');
       this.chatEl.classList.remove('hidden');
@@ -199,7 +196,7 @@ export default class Chat {
 
       const item = document.createElement('div');
       item.classList.add('chat__user');
-      if (isMe) item.style.color = '#f66'; // «You» на макете красное
+      if (isMe) item.style.color = '#f66'; 
 
       const avatar = document.createElement('div');
       avatar.style.cssText = `
@@ -239,7 +236,7 @@ export default class Chat {
     header.textContent = `${isMine ? 'You' : user.name}, ${timeStr} ${dateStr}`;
 
     const text = document.createElement('div');
-    text.textContent = message; // textContent вместо innerHTML — защита от XSS
+    text.textContent = message; 
 
     wrapper.appendChild(header);
     wrapper.appendChild(text);
