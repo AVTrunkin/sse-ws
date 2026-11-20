@@ -8,7 +8,9 @@ export default class Chat {
     this.api = new ChatAPI();
     this.websocket = null;
     this.user = null;
-    this.users = [];
+    this.reconnectAttempts = 0;
+    this.reconnectTimer = null;
+    this.intentionalClose = false;
   }
 
   init() {
@@ -19,6 +21,7 @@ export default class Chat {
 
     window.addEventListener('beforeunload', () => {
       if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+        this.intentionalClose = true;
         this.websocket.send(JSON.stringify({ type: 'exit', user: this.user }));
       }
     });
@@ -46,22 +49,14 @@ export default class Chat {
       </div>
 
       <div class="container hidden" data-role="chat">
-        <h1 class="chat__header" style="display:none;">Чат</h1>
-        
         <div class="chat__container">
-          <aside class="chat__userlist">
-            <h2 style="margin:0 0 15px 0; font-size:16px; color:#555;">Участники</h2>
-          </aside>
-
+          <aside class="chat__userlist"></aside>
           <section class="chat__area">
-            <div class="chat__messages-container">
-              <!-- Сюда JS будет вставлять сообщения -->
-            </div>
-            
+            <div class="chat__messages-container"></div>
             <div class="chat__messages-input">
               <form class="form">
                 <div class="form__group" style="margin:0;">
-                  <input class="form__input" name="message" placeholder="Type your message here" style="width:100%; border-radius:20px; padding:10px 15px;">
+                  <input class="form__input" name="message" placeholder="Type your message here">
                 </div>
               </form>
             </div>
@@ -72,39 +67,61 @@ export default class Chat {
 
   bindToDOM() {
     this.modal = this.container.querySelector('.modal__form');
+    this.modalBody = this.container.querySelector('.modal__form-body');
     this.modalName = this.container.querySelector('[name="name"]');
     this.modalHint = this.container.querySelector('.form__hint');
 
     this.chatEl = this.container.querySelector('[data-role="chat"]');
-    this.messagesContainer = this.container.querySelector('.chat__messages-container');
-    this.userlist = this.container.querySelector('.chat__userlist');
     this.chatForm = this.container.querySelector('.chat__messages-input form');
     this.chatInput = this.container.querySelector('[name="message"]');
+    this.messagesContainer = this.container.querySelector('.chat__messages-container');
+    this.userlist = this.container.querySelector('.chat__userlist');
   }
 
   registerEvents() {
-    this.modal.querySelector('.modal__ok').addEventListener('click', (e) => {
+    this.modalBody.addEventListener('submit', (e) => {
       e.preventDefault();
       const name = this.modalName.value.trim();
       if (name) this.onEnterChatHandler(name);
     });
-    
+
+    const okButton = this.container.querySelector('[data-role="ok"]');
+    if (okButton) {
+      okButton.addEventListener('click', () => {
+        const name = this.modalName.value.trim();
+        if (name) this.onEnterChatHandler(name);
+      });
+    }
+
     this.chatForm.addEventListener('submit', this.sendMessage.bind(this));
   }
 
-  subscribeOnEvents() {}
+  subscribeOnEvents() {
+    // подписка на события сокета происходит в openSocket
+  }
 
   onEnterChatHandler(name) {
     this.api.checkNickname(name, (err, data) => {
       if (err) {
-        this.modalHint.textContent = err.message || 'Ошибка соединения';
-        this.modalHint.classList.remove('hidden');
+        // Только показываем ошибку, модалку НЕ скрываем
+        this.showError(err.message || 'Ошибка соединения с сервером');
         return;
       }
-      
+
+      // Успех: сохраняем пользователя, убираем модалку, показываем чат
       this.user = data.user;
+      this.modal.classList.remove('active');
+      this.chatEl.classList.remove('hidden');
+      this.modalName.value = '';
+      this.modalHint.classList.add('hidden');
+
       this.openSocket();
     });
+  }
+
+  showError(text) {
+    this.modalHint.textContent = text;
+    this.modalHint.classList.toggle('hidden', !text);
   }
 
   openSocket() {
@@ -112,32 +129,53 @@ export default class Chat {
     this.websocket = new WebSocket(wsUrl);
 
     this.websocket.addEventListener('open', () => {
-      this.modal.classList.remove('active');
-      this.chatEl.classList.remove('hidden');
-      this.modalName.value = '';
-      this.modalHint.classList.add('hidden');
+      this.reconnectAttempts = 0;
+
+      if (!this.user) {
+        this.modal.classList.remove('active');
+        this.chatEl.classList.remove('hidden');
+        this.modalName.value = '';
+        this.modalHint.classList.add('hidden');
+      } else {
+        this.chatEl.classList.remove('hidden');
+        this.showError('');
+      }
     });
 
     this.websocket.addEventListener('message', (event) => {
       const data = JSON.parse(event.data);
-      switch (data.type) {
-        case 'message':
-          this.renderMessage(data);
-          break;
-        case 'users': 
-          this.renderUsers(data.users); 
-          break;
-      }
-      
+
       if (Array.isArray(data)) {
         this.renderUsers(data);
         return;
       }
-      
       if (data.type === 'send') {
         this.renderMessage(data);
       }
     });
+
+    this.websocket.addEventListener('close', () => {
+      if (this.intentionalClose) {
+        this.intentionalClose = false;
+        return;
+      }
+      if (!this.user) {
+        this.showError('Не удалось подключиться к серверу');
+        return;
+      }
+      this.scheduleReconnect();
+    });
+  }
+
+  scheduleReconnect() {
+    this.reconnectAttempts += 1;
+    const delay = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 10000);
+
+    this.chatEl.classList.add('hidden');
+    this.showError(`Соединение потеряно, переподключение через ${Math.round(delay / 1000)} с...`);
+
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = setTimeout(() => this.openSocket(), delay);
   }
 
   sendMessage(e) {
@@ -148,18 +186,20 @@ export default class Chat {
     this.websocket.send(JSON.stringify({
       type: 'send',
       message,
-      user: this.user
+      user: this.user,
     }));
     this.chatInput.value = '';
   }
 
   renderUsers(users) {
-    if (!this.userlist) return; 
     this.userlist.innerHTML = '';
 
     users.forEach((user) => {
+      const isMe = this.user && user.id === this.user.id;
+
       const item = document.createElement('div');
       item.classList.add('chat__user');
+      if (isMe) item.style.color = '#f66'; // «You» на макете красное
 
       const avatar = document.createElement('div');
       avatar.style.cssText = `
@@ -174,7 +214,7 @@ export default class Chat {
 
       const name = document.createElement('span');
       name.style.verticalAlign = 'middle';
-      name.textContent = user.name;
+      name.textContent = isMe ? 'You' : user.name;
 
       item.appendChild(avatar);
       item.appendChild(name);
@@ -190,17 +230,16 @@ export default class Chat {
       ? 'message__container-yourself'
       : 'message__container-interlocutor');
 
-   
     const date = new Date();
     const timeStr = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
     const dateStr = date.toLocaleDateString('ru-RU');
 
     const header = document.createElement('div');
     header.classList.add('message__header');
-    header.textContent = `${user.name}, ${timeStr} ${dateStr}`;
+    header.textContent = `${isMine ? 'You' : user.name}, ${timeStr} ${dateStr}`;
 
     const text = document.createElement('div');
-    text.textContent = message;
+    text.textContent = message; // textContent вместо innerHTML — защита от XSS
 
     wrapper.appendChild(header);
     wrapper.appendChild(text);
